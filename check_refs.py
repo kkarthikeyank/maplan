@@ -16,6 +16,8 @@ Outputs (per contract):
 import json, csv, re, os, sys, urllib.request, urllib.error, time
 from datetime import date
 
+FORCE_FRESH = False  # overridden by _run_cli() when run as a script; importers keep this default
+
 CONTRACTS = {
     "H1619": "https://medicare-advantage-plan-finder-provider-directory.jeffersonhealthplans.com/h1619/2027/index.json",
     "H3124": "https://medicare-advantage-plan-finder-provider-directory.jeffersonhealthplans.com/h3124/2027/index.json",
@@ -863,29 +865,37 @@ def build_report(contracts):
     print(f"\nWrote report: {xlsx_path}, {docx_path}")
 
 
-# CLI: python check_refs.py [CONTRACT ...] [--fresh]
-#   CONTRACT  one or more contracts, each run as its own separate pass (default: all)
-#   --fresh   force re-download, ignoring cached files (else cache auto-refreshes
-#             whenever the provider's index last_updated changes)
-args = [a for a in sys.argv[1:]]
-FORCE_FRESH = any(a.lower() in ("--fresh", "-f") for a in args)
-positional = [a for a in args if not a.startswith("-")]
+def _run_cli():
+    # CLI: python check_refs.py [CONTRACT ...] [--fresh]
+    #   CONTRACT  one or more contracts, each run as its own separate pass (default: all)
+    #   --fresh   force re-download, ignoring cached files (else cache auto-refreshes
+    #             whenever the provider's index last_updated changes)
+    global FORCE_FRESH
+    args = [a for a in sys.argv[1:]]
+    FORCE_FRESH = any(a.lower() in ("--fresh", "-f") for a in args)
+    positional = [a for a in args if not a.startswith("-")]
 
-if positional:
-    targets = {}
-    for a in positional:
-        code = a.upper()
-        if code not in CONTRACTS:
-            print(f"Unknown contract '{a}'. Choose from: {', '.join(CONTRACTS)}")
-            sys.exit(1)
-        targets[code] = CONTRACTS[code]
-else:
-    targets = CONTRACTS
+    if positional:
+        targets = {}
+        for a in positional:
+            code = a.upper()
+            if code not in CONTRACTS:
+                print(f"Unknown contract '{a}'. Choose from: {', '.join(CONTRACTS)}")
+                sys.exit(1)
+            targets[code] = CONTRACTS[code]
+    else:
+        targets = CONTRACTS
 
-grand_total = 0
-for c, u in targets.items():
-    grand_total += run(c, u)
-if len(targets) > 1:
-    print(f"\n==== ALL CONTRACTS: {grand_total:,} total dangling references ====")
+    grand_total = 0
+    for c, u in targets.items():
+        grand_total += run(c, u)
+    if len(targets) > 1:
+        print(f"\n==== ALL CONTRACTS: {grand_total:,} total dangling references ====")
 
-build_report(list(targets))
+    build_report(list(targets))
+
+
+# Guarded so other scripts can `import check_refs` (to reuse CONTRACTS/fetch/etc.)
+# without triggering a full validation run as a side effect of the import.
+if __name__ == "__main__":
+    _run_cli()

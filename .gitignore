@@ -18,6 +18,12 @@ resource_counts_*.csv
 reference_integrity_contract_*_report.xlsx
 reference_integrity_contract_*_report.docx
 validation_run.log
+validation_run_*.log
+
+# Per-run MPF change-detection artifacts -- state/mpf_state.json itself IS
+# committed (it's the durable record); these are transient per-run files.
+state/plan_result.json
+state/state_*.json
 
 # Never commit secrets
 .env

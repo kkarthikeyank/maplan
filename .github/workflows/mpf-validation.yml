@@ -1,0 +1,176 @@
+name: MPF Provider Directory Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Contract to validate"
+        required: true
+        type: choice
+        options: [ALL, H1619, H3124, H5826, H9207]
+        default: ALL
+  schedule:
+    # Checks each contract's index.json for changes every 15 minutes.
+    # This only fetches the small index.json per contract to check
+    # last_updated -- it does NOT download full provider-directory bundles
+    # unless a contract actually changed.
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: mpf-validation
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # finalize job commits the updated state file back to main
+
+jobs:
+  plan:
+    name: Detect changed contracts
+    runs-on: ubuntu-latest
+    outputs:
+      contracts_json: ${{ steps.plan.outputs.contracts_json }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MANUAL_CONTRACT: ${{ github.event.inputs.contract }}
+        run: python .github/scripts/mpf_plan.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mpf-plan-result
+          path: state/plan_result.json
+          retention-days: 7
+
+  validate:
+    name: Validate ${{ matrix.contract }}
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        contract: ${{ fromJson(needs.plan.outputs.contracts_json) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Download change-detection plan
+        uses: actions/download-artifact@v4
+        with:
+          name: mpf-plan-result
+          path: state
+
+      - name: Run validation script for ${{ matrix.contract }}
+        id: run_validation
+        continue-on-error: true
+        run: |
+          echo "Starting validation for ${{ matrix.contract }}"
+          set -o pipefail
+          python check_refs.py "${{ matrix.contract }}" 2>&1 | tee "validation_run_${{ matrix.contract }}.log"
+          exit_code=${PIPESTATUS[0]}
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          echo "Validation script finished with exit code $exit_code"
+
+      - name: Collect report files
+        if: always()
+        run: |
+          mkdir -p reports
+          cp -v *"${{ matrix.contract }}"*.csv reports/ 2>/dev/null || echo "No CSV files to collect"
+          cp -v reference_integrity_contract_"${{ matrix.contract }}"_report.* reports/ 2>/dev/null || echo "No report to collect"
+          cp -v "validation_run_${{ matrix.contract }}.log" reports/ 2>/dev/null || true
+          ls -la reports/
+
+      - name: Summarize results
+        if: always()
+        run: python .github/scripts/summarize_report.py
+
+      - name: Record contract state (advances only on success)
+        if: always()
+        env:
+          CONTRACT: ${{ matrix.contract }}
+          SCRIPT_EXIT_CODE: ${{ steps.run_validation.outputs.exit_code }}
+        run: python .github/scripts/mpf_write_state.py
+
+      - name: Send per-contract email
+        if: always()
+        env:
+          CONTRACT: ${{ matrix.contract }}
+          RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && 'Manual' || 'Automatic' }}
+          SCRIPT_EXIT_CODE: ${{ steps.run_validation.outputs.exit_code }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python .github/scripts/mpf_send_email.py
+
+      - name: Upload report artifact for ${{ matrix.contract }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpf-report-${{ matrix.contract }}
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload contract state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpf-state-${{ matrix.contract }}
+          path: state/state_${{ matrix.contract }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Fail the job if the script crashed
+        if: steps.run_validation.outputs.exit_code != '0'
+        run: |
+          echo "::error::Validation script for ${{ matrix.contract }} exited with code ${{ steps.run_validation.outputs.exit_code }}"
+          exit 1
+
+  finalize:
+    name: Update state and summary
+    needs: [plan, validate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mpf-plan-result
+          path: state
+        continue-on-error: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "mpf-state-*"
+          path: state_artifacts
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Merge state and print final summary
+        run: python .github/scripts/mpf_finalize.py
+
+      - name: Commit updated state (only if it changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/mpf_state.json
+          if git diff --cached --quiet; then
+            echo "No state change to commit."
+          else
+            git commit -m "chore: update MPF validation state [skip ci]"
+            git push
+          fi

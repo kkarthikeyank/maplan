@@ -47,6 +47,15 @@ Outputs land in the current directory:
 No credentials are required — the script only reads each contract's public
 `index.json` and bundle files over HTTPS.
 
+There are two GitHub Actions workflows on top of this script:
+
+- **[`run-validation.yml`](#automated-validation)** — simple manual/scheduled
+  run of one, several, or all contracts, every time it fires.
+- **[`mpf-validation.yml`](#mpf-automatic-change-detection-validation)** —
+  checks each contract's `index.json` for changes every 15 minutes and only
+  validates + emails for contracts that actually changed, plus an on-demand
+  manual mode. Use this one if you want "only tell me when something changed."
+
 ## Automated Validation
 
 The validation runs automatically via GitHub Actions:
@@ -143,3 +152,95 @@ run log instead of the pass/fail counts.
   the workflow succeeds as long as the script itself ran to completion. FAIL
   findings are data-quality results, not a workflow error; check the emailed
   report / artifact for details.
+
+## MPF Automatic Change-Detection Validation
+
+[`.github/workflows/mpf-validation.yml`](.github/workflows/mpf-validation.yml)
+is the "only validate what actually changed" workflow. It reuses
+`check_refs.py` unmodified — it never duplicates or rewrites the validation
+logic, it only decides *when* to call it and sends a per-contract email
+afterward.
+
+```
+Scheduled (every 15 min) ──┐
+                            ├─→ plan job (checks index.json) ─→ validate job (matrix, one per
+Manual (workflow_dispatch) ─┘                                   changed/selected contract) ─→ finalize job
+                                                                  │
+                                                                  ├─→ python check_refs.py <CONTRACT>  (unchanged)
+                                                                  ├─→ per-contract email
+                                                                  └─→ per-contract report artifact
+```
+
+### How change detection works
+
+- `state/mpf_state.json` stores the last successfully-processed `last_updated`
+  value per contract (committed to the repo — it's the durable record).
+- Every scheduled run, the **plan** job fetches each contract's small
+  `index.json` (not the full bundles) and compares `last_updated` against the
+  stored value.
+  - **Unchanged** → contract is skipped entirely: no download, no validation,
+    no report, no email.
+  - **Changed** (or never seen before) → contract is queued.
+- The **validate** job runs as a matrix — one job per queued contract, each
+  calling `python check_refs.py <CONTRACT>` independently. A change in H1619
+  never triggers validation for H3124/H5826/H9207.
+- `state/mpf_state.json` is only advanced for a contract **after its
+  validation completes successfully** (exit code 0). If the script crashes,
+  that contract's stored value is left untouched, so the same update is
+  retried on the next scheduled run instead of being silently marked done.
+
+### Manual mode
+
+Actions → **MPF Provider Directory Validation** → Run workflow → choose
+`ALL` or a specific contract (`H1619` / `H3124` / `H5826` / `H9207`) from the
+dropdown → Run workflow. Manual mode always runs the selected contract(s),
+regardless of whether the data actually changed — it's an explicit request,
+not a change check. Runs entirely on GitHub's runners; your own computer
+does not need to be on.
+
+### Email content
+
+Each processed contract gets its own email:
+
+- **Automatic**, data changed, no issues: `[MPF AUTO VALIDATION] H1619 - Provider Directory Updated & Validation Completed`
+- **Automatic/Manual, validation script crashed**: `[MPF AUTO VALIDATION] H1619 - Validation Script FAILED` — state is *not* advanced for this contract; body includes the log tail and says so explicitly.
+- **Validation completed but found dangling references**: subject includes `(FAILED)`, body lists the failed checks (source → field → target, with counts).
+- **Manual**: `[MPF MANUAL VALIDATION] H5826 - Validation Report`.
+
+Note on honesty: `check_refs.py` validates end-to-end (download → parse →
+reference-integrity checks → report generation) rather than instrumenting
+"FHIR Validation" and "Business Validation" as separate, independently
+measured phases. The email reports **Provider Directory Download**, **JSON
+Parsing**, **Reference Integrity**, and **Report Generation** as the phases
+that are actually distinguishable from the script's behavior, rather than
+inventing pass/fail for checks it doesn't perform.
+
+### Required GitHub Secrets
+
+Same as [Automated Validation](#automated-validation) above:
+`EMAIL_USERNAME`, `EMAIL_PASSWORD`, `EMAIL_TO`, optional `SMTP_SERVER` /
+`SMTP_PORT`. Missing secrets → validation and state updates still happen,
+email is skipped with a warning.
+
+### Testing it
+
+- **Test manual mode**: Actions → MPF Provider Directory Validation → Run
+  workflow → pick one contract → confirm exactly one email/report is
+  produced and `state/mpf_state.json` updates for that contract only.
+- **Test that unchanged contracts are skipped**: run the workflow twice in a
+  row (scheduled or via `workflow_dispatch` with the same contract data) —
+  the second run's **plan** job step summary should show `NO CHANGE` for
+  every contract and the **validate** job should not run at all
+  (`has_work: false`).
+- **Test that only the changed contract runs**: this can't be forced without
+  the upstream data changing, but the plan job's step summary always shows
+  the full 4-contract comparison table (`current` vs `previous` per
+  contract), so you can confirm which one(s) triggered a run.
+- **Test that your PC being off doesn't matter**: trigger a run from a
+  different device (or just don't touch your PC) — the scheduled cron and
+  manual dispatch both execute entirely on GitHub-hosted runners.
+- **Example logs**: the plan job's Step Summary always renders the
+  4-contract comparison table; the finalize job's Step Summary renders the
+  final per-contract outcome table (`COMPLETED` / `FAILED (exit code N)` /
+  `SKIPPED - NO CHANGE`) — both visible directly on the workflow run page
+  without downloading anything.
