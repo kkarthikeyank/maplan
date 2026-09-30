@@ -26,6 +26,9 @@ import smtplib
 import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from html import escape as html_escape
+
+from build_html_report import build_html_report
 
 REPORTS_DIR = "reports"
 PLAN_RESULT_PATH = "state/plan_result.json"
@@ -167,6 +170,20 @@ Report:
     return subject, body
 
 
+def build_html_body(plain_body, contract, script_crashed):
+    """Wraps the plain-text summary + the full report tables (same content as
+    the .docx / the run-validation.yml email) into one HTML body, scoped to
+    just this contract, so the reader sees the results without opening the
+    attachment."""
+    header_html = "<br>".join(html_escape(line) for line in plain_body.splitlines())
+    report_html = "" if script_crashed else build_html_report([contract])
+    return f"""\
+<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+<div style="white-space:normal">{header_html}</div>
+{report_html}
+</body></html>"""
+
+
 def attach_reports(msg, contract):
     for path in find_report_files(contract):
         with open(path, "rb") as f:
@@ -202,7 +219,8 @@ def main():
     msg["Subject"] = subject
     msg["From"] = username
     msg["To"] = ", ".join(recipients)
-    msg.set_content(body)
+    msg.set_content(body)  # plain-text fallback for clients that don't render HTML
+    msg.add_alternative(build_html_body(body, contract, script_crashed), subtype="html")
     if not script_crashed:
         attach_reports(msg, contract)
 
