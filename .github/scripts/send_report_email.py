@@ -125,8 +125,10 @@ def main():
         return
 
     recipients = [addr.strip() for addr in to_raw.split(",") if addr.strip()]
-    smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+    # An unset GitHub secret still arrives as an empty string, not a missing
+    # env var, so `.get(key, default)` alone won't fall back -- `or` catches it.
+    smtp_server = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
+    smtp_port = int(os.environ.get("SMTP_PORT") or "465")
     run_url = os.environ.get("RUN_URL", "")
 
     exit_code = os.environ.get("SCRIPT_EXIT_CODE", "0")
