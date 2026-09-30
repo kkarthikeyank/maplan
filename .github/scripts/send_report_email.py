@@ -145,9 +145,17 @@ def main():
     attach_reports(msg)
 
     context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context) as server:
-        server.login(username, password)
-        server.send_message(msg)
+    # Port 465 = implicit TLS (Gmail's default). Everything else -- notably
+    # Office365/Outlook's 587 -- speaks plaintext then upgrades via STARTTLS.
+    if smtp_port == 465:
+        with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context) as server:
+            server.login(username, password)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls(context=context)
+            server.login(username, password)
+            server.send_message(msg)
 
     print(f"Email sent to {', '.join(recipients)} via {smtp_server}:{smtp_port}")
 

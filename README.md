@@ -75,8 +75,8 @@ secret**:
 | `EMAIL_USERNAME` | For email | SMTP login, e.g. your Gmail address |
 | `EMAIL_PASSWORD` | For email | SMTP password (see Gmail note below) |
 | `EMAIL_TO` | For email | Recipient(s). Comma-separated for multiple, e.g. `a@x.com,b@x.com` |
-| `SMTP_SERVER` | Optional | Defaults to `smtp.gmail.com` |
-| `SMTP_PORT` | Optional | Defaults to `465` |
+| `SMTP_SERVER` | Optional | Defaults to `smtp.gmail.com`. Set to `smtp.office365.com` for Outlook/Microsoft 365 |
+| `SMTP_PORT` | Optional | Defaults to `465` (implicit TLS, Gmail). Use `587` for Office365 (STARTTLS) |
 
 If any of `EMAIL_USERNAME` / `EMAIL_PASSWORD` / `EMAIL_TO` is missing, the
 workflow still runs the validation and uploads the report artifact — it just
@@ -87,6 +87,13 @@ secret never fails the workflow.
 Generate one at <https://myaccount.google.com/apppasswords> (requires 2-Step
 Verification to be enabled on the account) and store that in the
 `EMAIL_PASSWORD` secret.
+
+**Using Outlook / Microsoft 365:** set `SMTP_SERVER` to `smtp.office365.com`
+and `SMTP_PORT` to `587`. If the account has MFA/Security Defaults enabled
+(the Microsoft 365 default), SMTP AUTH with the regular password will be
+rejected — either use an **App Password**
+(<https://mysignins.microsoft.com/security-info>, if the tenant allows them)
+or have your admin enable SMTP AUTH for the mailbox.
 
 ### Where the report is generated
 
