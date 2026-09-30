@@ -1,0 +1,29 @@
+# Downloaded FHIR bundles (large, re-downloaded on each run)
+cache/
+
+# Generated report files (produced fresh by each run / CI artifact upload)
+reports/*.csv
+reports/*.xlsx
+reports/*.docx
+reports/*.json
+reports/*.log
+!reports/.gitkeep
+
+# Locally-generated reports at repo root (same reason)
+dangling_refs_*.csv
+dangling_summary_*.csv
+orphan_refs_*.csv
+placeholder_refs_*.csv
+resource_counts_*.csv
+FHIR_Reference_Integrity_Report.xlsx
+FHIR_Reference_Integrity_Report.docx
+validation_run.log
+
+# Never commit secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc

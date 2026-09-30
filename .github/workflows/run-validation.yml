@@ -1,0 +1,107 @@
+name: FHIR Provider Directory Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Contract code to validate (e.g. H1619). Leave blank to validate all contracts."
+        required: false
+        default: ""
+  schedule:
+    # Every Monday at 06:00 UTC. Edit this line to change the schedule.
+    - cron: "0 6 * * 1"
+
+# Avoid two validation runs stepping on each other's cache/report files.
+concurrency:
+  group: fhir-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Run FHIR reference validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          echo "Installing dependencies from requirements.txt"
+          pip install -r requirements.txt
+
+      - name: Check email configuration
+        run: |
+          if [ -z "${{ secrets.EMAIL_USERNAME }}" ] || [ -z "${{ secrets.EMAIL_PASSWORD }}" ] || [ -z "${{ secrets.EMAIL_TO }}" ]; then
+            echo "::warning::EMAIL_USERNAME, EMAIL_PASSWORD, or EMAIL_TO secret is not set. The report will still be generated and uploaded as a workflow artifact, but no email will be sent."
+          else
+            echo "Email secrets are configured."
+          fi
+
+      - name: Run validation script
+        id: run_validation
+        continue-on-error: true
+        env:
+          CONTRACT_INPUT: ${{ github.event.inputs.contract }}
+        run: |
+          echo "Starting FHIR provider directory validation..."
+          set -o pipefail
+          if [ -n "$CONTRACT_INPUT" ]; then
+            echo "Validating single contract: $CONTRACT_INPUT"
+            python check_refs.py "$CONTRACT_INPUT" 2>&1 | tee validation_run.log
+          else
+            echo "Validating all configured contracts"
+            python check_refs.py 2>&1 | tee validation_run.log
+          fi
+          exit_code=${PIPESTATUS[0]}
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          echo "Validation script finished with exit code $exit_code"
+
+      - name: Collect report files
+        if: always()
+        run: |
+          mkdir -p reports
+          echo "Collecting generated report files into reports/"
+          cp -v *.csv reports/ 2>/dev/null || echo "No CSV files to collect"
+          cp -v *.xlsx reports/ 2>/dev/null || echo "No XLSX report to collect"
+          cp -v *.docx reports/ 2>/dev/null || echo "No DOCX report to collect"
+          cp -v validation_run.log reports/ 2>/dev/null || true
+          echo "Report location: reports/"
+          ls -la reports/
+
+      - name: Summarize results
+        if: always()
+        run: python .github/scripts/summarize_report.py
+
+      - name: Upload validation report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-validation-report
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Send validation email
+        if: always()
+        env:
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SCRIPT_EXIT_CODE: ${{ steps.run_validation.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python .github/scripts/send_report_email.py
+
+      - name: Fail the workflow if the script crashed
+        if: steps.run_validation.outputs.exit_code != '0'
+        run: |
+          echo "::error::Validation script exited with code ${{ steps.run_validation.outputs.exit_code }}. See validation_run.log in the uploaded artifact."
+          exit 1

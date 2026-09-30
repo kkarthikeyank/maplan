@@ -43,6 +43,21 @@ def has_placeholder_extension(resource):
             return True
     return False
 
+# Resource types where being "orphaned" (never referenced back) is expected by
+# design -- e.g. a Payer- or Network-level Organization has no reason to appear
+# as the target of an OrganizationAffiliation.organization link. Matched
+# case-insensitively as a substring of the resource's type/type.coding display,
+# including the raw Da Vinci PDex Plan-Net codes ("ntwk" = Network, "payer" = Payer)
+# alongside the spelled-out display text, since either can show up depending on
+# whether the source data population used type.text or type.coding.code/display.
+EXPECTED_ORPHAN_TYPES = {"payer", "network", "ntwk"}
+
+
+def is_expected_orphan_type(type_str):
+    low = (type_str or "").lower()
+    return any(t in low for t in EXPECTED_ORPHAN_TYPES)
+
+
 PLACEHOLDER_LITERALS = {
     "test", "example", "unknown", "tbd", "n/a", "na", "none", "null",
     "sample", "dummy", "fake", "todo", "xxx", "0000000000",
@@ -250,6 +265,7 @@ def run(contract, index_url):
     print("Pass 1: indexing existing resource ids ...", flush=True)
     existing = set()
     identifiers = {}              # (resourceType, id) -> "system|value" identifiers, joined by "; "
+    org_meta = {}                  # (resourceType, id) -> {"name": ..., "type": "Payer; Network"}
     raw_type_counts = {}          # includes duplicate ids (raw entry count)
     ext_placeholder_by_file = {}  # fname -> count of resources with resource-placeholder ext
     for url, fname, category, part in files:
@@ -264,6 +280,28 @@ def run(contract, index_url):
                           for i in (r.get("identifier") or []) if isinstance(i, dict)]
                 if idents:
                     identifiers[(rt, str(rid))] = "; ".join(idents)
+                if rt in ("Organization", "Practitioner"):
+                    type_labels = []
+                    for t in (r.get("type") or []):
+                        if not isinstance(t, dict):
+                            continue
+                        if t.get("text"):
+                            type_labels.append(t["text"])
+                        for coding in t.get("coding", []) or []:
+                            if coding.get("display"):
+                                type_labels.append(coding["display"])
+                            elif coding.get("code"):
+                                type_labels.append(coding["code"])
+                    name = r.get("name")
+                    if isinstance(name, list):  # Practitioner.name is HumanName[]
+                        name = " ".join(
+                            " ".join(n.get("given", []) + [n.get("family", "")])
+                            for n in name if isinstance(n, dict)
+                        ).strip()
+                    org_meta[(rt, str(rid))] = {
+                        "name": name or "",
+                        "type": "; ".join(dict.fromkeys(type_labels)),
+                    }
             if has_placeholder_extension(r):
                 ext_placeholder_by_file[fname] = ext_placeholder_by_file.get(fname, 0) + 1
             n += 1
@@ -447,9 +485,6 @@ def run(contract, index_url):
             ip_not_conn = len(ip_org) - ip_conn
             print(f"\nEnd-to-end: InsurancePlan -> Organization placeholder ids: "
                   f"{len(ip_org):,} total ({ip_conn:,} connected, {ip_not_conn:,} not connected)")
-            for src_type, src_id, fname, field, tgt_type, tgt_id, connected in ip_org:
-                print(f"  InsurancePlan/{src_id} --{field}--> Organization/{tgt_id} "
-                      f"[{('connected' if connected == 'yes' else 'NOT CONNECTED')}]")
 
         # End-to-end: OrganizationAffiliation -> Organization specifically.
         oa_org = [r for r in placeholder_refs
@@ -459,9 +494,6 @@ def run(contract, index_url):
             oa_not_conn = len(oa_org) - oa_conn
             print(f"\nEnd-to-end: OrganizationAffiliation -> Organization placeholder ids: "
                   f"{len(oa_org):,} total ({oa_conn:,} connected, {oa_not_conn:,} not connected)")
-            for src_type, src_id, fname, field, tgt_type, tgt_id, connected in oa_org:
-                print(f"  OrganizationAffiliation/{src_id} --{field}--> Organization/{tgt_id} "
-                      f"[{('connected' if connected == 'yes' else 'NOT CONNECTED')}]")
 
         # End-to-end: PractitionerRole -> Practitioner specifically.
         pr_prac = [r for r in placeholder_refs
@@ -471,11 +503,11 @@ def run(contract, index_url):
             pr_not_conn = len(pr_prac) - pr_conn
             print(f"\nEnd-to-end: PractitionerRole -> Practitioner placeholder ids: "
                   f"{len(pr_prac):,} total ({pr_conn:,} connected, {pr_not_conn:,} not connected)")
-            for src_type, src_id, fname, field, tgt_type, tgt_id, connected in pr_prac:
-                print(f"  PractitionerRole/{src_id} --{field}--> Practitioner/{tgt_id} "
-                      f"[{('connected' if connected == 'yes' else 'NOT CONNECTED')}]")
 
     # ---- Reverse/orphan checks: published resources never referenced back ----
+    # Scoped to just these two relationships -- checking every resource type ever
+    # referenced (e.g. Location, HealthcareService) blows up into hundreds of
+    # thousands of rows since most such relationships are 1-to-many by design.
     # e.g. an Organization with no OrganizationAffiliation.organization pointing to it,
     # or a Practitioner with no PractitionerRole.practitioner pointing to it.
     ORPHAN_CHECKS = [
@@ -488,21 +520,38 @@ def run(contract, index_url):
         referenced = referenced_ids.get(key, set())
         all_ids = {rid for (rt, rid) in existing if rt == tgt_type}
         orphans = sorted(all_ids - referenced)
-        if not all_ids:
+        if not all_ids or not orphans:
             continue
         print(f"\n--- {contract}: {tgt_type} not referenced by any {ref_src_type}.{field} ---")
         print(f"{len(orphans):,} of {len(all_ids):,} {tgt_type} resources are orphaned "
               f"({100.0 * len(orphans) / len(all_ids):.2f}%)")
         for oid in orphans:
+            meta = org_meta.get((tgt_type, oid), {})
+            otype = meta.get("type", "")
+            flag = "Expected" if is_expected_orphan_type(otype) else "Review"
             orphan_rows.append([tgt_type, oid, identifiers.get((tgt_type, oid), ""),
+                                 meta.get("name", ""), otype, flag,
                                  ref_src_type, field])
 
     if orphan_rows:
         with open(f"orphan_refs_{contract}.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["orphan_type", "orphan_id", "identifier",
+            w.writerow(["orphan_type", "orphan_id", "identifier", "name", "org_type", "flag",
                         "expected_referencing_type", "expected_field"])
             w.writerows(orphan_rows)
+
+    # ---- Console: the two headline connectivity checks only ----
+    org_orphan_n = sum(1 for r in orphan_rows
+                        if r[0] == "Organization" and r[6] == "OrganizationAffiliation"
+                        and r[7] == "organization")
+    prac_orphan_n = sum(1 for r in orphan_rows
+                         if r[0] == "Practitioner" and r[6] == "PractitionerRole"
+                         and r[7] == "practitioner")
+    print(f"\nOrphan Connectivity Checks")
+    print(f"Organization is connected to OrganizationAffiliation"
+          + (f" - ({org_orphan_n:,} orphaned)" if org_orphan_n else ""))
+    print(f"Practitioner is connected to PractitionerRole"
+          + (f" - ({prac_orphan_n:,} orphaned)" if prac_orphan_n else ""))
 
     print(f"\nTotal dangling references: {len(dangling):,}")
     print(f"Wrote: dangling_refs_{contract}.csv, dangling_summary_{contract}.csv"
@@ -550,12 +599,24 @@ def build_report(contracts):
             e["total"] += 1
             if connected == "yes":
                 e["connected"] += 1
-        org_orphans = sum(1 for r in orows if r[0] == "Organization")
-        prac_orphans = sum(1 for r in orows if r[0] == "Practitioner")
+        # Fully dynamic: group orphan rows by the actual (orphan_type -> referencing
+        # relationship) they belong to, whatever those turn out to be -- not a
+        # hardcoded Organization/Practitioner pair. Column 4 (org_type / e.g.
+        # Payer, Network) explains *why* each group is orphaned.
+        conn_checks = {}
+        for r in orows:
+            orphan_type, _, _, _, otype, flag, ref_type, field = r[:8]
+            key = (orphan_type, ref_type, field)
+            e = conn_checks.setdefault(key, {"count": 0, "types": {}, "review": []})
+            e["count"] += 1
+            if otype:
+                e["types"][otype] = e["types"].get(otype, 0) + 1
+            if flag == "Review":
+                e["review"].append(r)
         data[c] = dict(shdr=shdr, srows=srows, ohdr=ohdr, orows=orows,
                         crows=crows, ph_by_type=ph_by_type,
                         total_dangling=total_dangling, total_affected=total_affected,
-                        org_orphans=org_orphans, prac_orphans=prac_orphans)
+                        conn_checks=conn_checks)
 
     grand_dangling = sum(d["total_dangling"] for d in data.values())
     grand_orphans = sum(len(d["orows"]) for d in data.values())
@@ -717,15 +778,62 @@ def build_report(contracts):
             doc.add_paragraph("No placeholder-looking ids found.")
 
         doc.add_heading("5. Orphan Connectivity Checks", level=2)
-        org_status = "Pass" if d["org_orphans"] == 0 else f"Pass ({d['org_orphans']} orphaned)"
-        prac_status = "Pass" if d["prac_orphans"] == 0 else f"Pass ({d['prac_orphans']} orphaned)"
-        doc.add_paragraph(f"Organization is connected to OrganizationAffiliation - {org_status}")
-        doc.add_paragraph(f"Practitioner is connected to PractitionerRole - {prac_status}")
+        # Fully dynamic: one line per (orphan_type -> referencing relationship)
+        # actually observed for this contract. An orphan of an EXPECTED_ORPHAN_TYPES
+        # type (e.g. Payer, Network) stays Pass -- it's not meant to be linked.
+        # Anything else is flagged REVIEW so a real gap doesn't hide behind a Pass.
+        any_review = False
+        if d["conn_checks"]:
+            for (orphan_type, ref_type, field), e in sorted(d["conn_checks"].items()):
+                type_note = ""
+                if e["types"]:
+                    breakdown = ", ".join(f"{t}: {n}" for t, n in sorted(e["types"].items()))
+                    type_note = f" -- type(s): {breakdown}"
+                if e["review"]:
+                    any_review = True
+                    status = f"REVIEW ({len(e['review'])} of {e['count']} not an expected type)"
+                else:
+                    status = "Pass"
+                doc.add_paragraph(
+                    f"{orphan_type} is connected to {ref_type}.{field} - "
+                    f"{status} ({e['count']} orphaned{type_note})"
+                )
+                if e["review"]:
+                    rt = doc.add_table(rows=1, cols=4)
+                    rt.style = "Light List Accent 2"
+                    rh = rt.rows[0].cells
+                    for i, h in enumerate(["Orphan ID", "Identifier", "Name", "Type"]):
+                        rh[i].text = h
+                        rh[i].paragraphs[0].runs[0].font.bold = True
+                    for row in e["review"]:
+                        rc = rt.add_row().cells
+                        rc[0].text = row[1]
+                        rc[1].text = row[2]
+                        rc[2].text = row[3]
+                        rc[3].text = row[4] or "(no type)"
+            doc.add_paragraph(
+                "Note: orphans of an expected type (Payer, Network) are normal -- "
+                "those Organization levels are not required to be linked via an "
+                "OrganizationAffiliation record. Any REVIEW line above lists "
+                "orphans of an unexpected type that likely need a data fix. "
+                "See the Orphan Details table below for the full breakdown."
+            )
+        else:
+            doc.add_paragraph("Every published resource is referenced back at least "
+                               "once by its expected relationship - Pass.")
 
         doc.add_heading("6. Orphan Details", level=2)
+        ORPHAN_TABLE_CAP = 500
         if d["orows"]:
-            add_table(doc, ["Orphan Type", "Orphan ID", "Identifier",
-                            "Expected Referencing Type", "Expected Field"], d["orows"])
+            shown = d["orows"][:ORPHAN_TABLE_CAP]
+            add_table(doc, ["Orphan Type", "Orphan ID", "Identifier", "Name",
+                            "Org/Practitioner Type", "Flag",
+                            "Expected Referencing Type", "Expected Field"], shown)
+            if len(d["orows"]) > ORPHAN_TABLE_CAP:
+                doc.add_paragraph(
+                    f"... {len(d['orows']) - ORPHAN_TABLE_CAP:,} more not shown here -- "
+                    f"see orphan_refs_{c}.csv for the full list."
+                )
         else:
             doc.add_paragraph("No orphaned resources found for this contract.")
 
