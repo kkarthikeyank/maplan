@@ -94,7 +94,6 @@ Please find the detailed validation report attached.
     if run_url:
         body += f"\nFull GitHub Actions run: {run_url}\n"
 
-    body += "\nThanks,\nQA Team\n"
     return subject, body
 
 

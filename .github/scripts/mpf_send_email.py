@@ -104,9 +104,6 @@ be re-attempted on the next scheduled run.
 Last log lines:
 
 {log_tail}
-
-Thanks,
-MPF Provider Directory Automation
 """
         return subject, body
 
@@ -166,7 +163,6 @@ Report:
     if run_url:
         body += f"\nFull GitHub Actions run: {run_url}\n"
 
-    body += "\nThanks,\nMPF Provider Directory Automation\n"
     return subject, body
 
 
