@@ -27,6 +27,9 @@ import smtplib
 import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from html import escape as html_escape
+
+from build_html_report import build_html_report
 
 REPORTS_DIR = "reports"
 
@@ -39,7 +42,7 @@ def load_summary():
     return None
 
 
-def build_message(summary, script_crashed, exit_code, run_url):
+def build_message(summary, script_crashed, exit_code, run_url, attached_names):
     exec_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     environment = os.environ.get("VALIDATION_ENVIRONMENT", "Production")
 
@@ -69,6 +72,10 @@ WARNING: {warn_n}
 
 Please find the detailed validation report attached.
 """
+    if attached_names:
+        body += "\nAttached report file(s):\n"
+        for name in attached_names:
+            body += f"  - {name}\n"
     if script_crashed:
         log_tail = ""
         log_path = os.path.join(REPORTS_DIR, "validation_run.log")
@@ -91,16 +98,33 @@ Please find the detailed validation report attached.
     return subject, body
 
 
-def attach_reports(msg):
+def build_html_body(plain_body, script_crashed):
+    """Wraps the plain-text summary + the full per-contract report tables
+    (same content as the .docx) into one HTML email body, so the reader sees
+    the results without opening the attachment."""
+    header_html = "<br>".join(html_escape(line) for line in plain_body.splitlines())
+    report_html = "" if script_crashed else build_html_report()
+    return f"""\
+<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+<div style="white-space:normal">{header_html}</div>
+{report_html}
+</body></html>"""
+
+
+def find_report_files():
     # Prefer the Excel workbook (per the task: Excel preferred when supported);
     # fall back to whatever CSV/docx report files exist if xlsx wasn't produced.
+    # Filenames are dynamic (e.g. reference_integrity_contract_H5826_report.xlsx),
+    # named after whichever contract(s) check_refs.py just ran.
     candidates = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.xlsx")))
     candidates += sorted(glob.glob(os.path.join(REPORTS_DIR, "*.docx")))
     if not candidates:
         candidates = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.csv")))
+    return candidates
 
-    attached_any = False
-    for path in candidates:
+
+def attach_reports(msg, paths):
+    for path in paths:
         with open(path, "rb") as f:
             data = f.read()
         msg.add_attachment(
@@ -109,8 +133,6 @@ def attach_reports(msg):
             subtype="octet-stream",
             filename=os.path.basename(path),
         )
-        attached_any = True
-    return attached_any
 
 
 def main():
@@ -135,14 +157,17 @@ def main():
     script_crashed = exit_code not in ("0", "", None)
 
     summary = load_summary()
-    subject, body = build_message(summary, script_crashed, exit_code, run_url)
+    report_paths = find_report_files()
+    attached_names = [os.path.basename(p) for p in report_paths]
+    subject, body = build_message(summary, script_crashed, exit_code, run_url, attached_names)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = username
     msg["To"] = ", ".join(recipients)
-    msg.set_content(body)
-    attach_reports(msg)
+    msg.set_content(body)  # plain-text fallback for clients that don't render HTML
+    msg.add_alternative(build_html_body(body, script_crashed), subtype="html")
+    attach_reports(msg, report_paths)
 
     context = ssl.create_default_context()
     # Port 465 = implicit TLS (Gmail's default). Everything else -- notably

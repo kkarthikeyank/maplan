@@ -12,8 +12,10 @@ provider-directory bundles, then:
    to by an `OrganizationAffiliation`, and `Practitioner` resources never
    pointed to by a `PractitionerRole` ("orphan" checks).
 
-It writes per-contract CSVs plus a combined `FHIR_Reference_Integrity_Report.xlsx`
-and `FHIR_Reference_Integrity_Report.docx`.
+It writes per-contract CSVs plus a combined Excel/Word report named after the
+contract(s) just run, e.g. `reference_integrity_contract_H5826_report.xlsx`
+for one contract, or `reference_integrity_contract_H1619_H3124_report.xlsx`
+for several.
 
 ## Running locally
 
@@ -40,7 +42,7 @@ Outputs land in the current directory:
 - `orphan_refs_<CONTRACT>.csv` — resources never referenced back
 - `placeholder_refs_<CONTRACT>.csv` — dummy/test-looking target ids
 - `resource_counts_<CONTRACT>.csv` — total published resources per type
-- `FHIR_Reference_Integrity_Report.xlsx` / `.docx` — combined report
+- `reference_integrity_contract_<CONTRACT(S)>_report.xlsx` / `.docx` — combined report, named after whichever contract(s) were run
 
 No credentials are required — the script only reads each contract's public
 `index.json` and bundle files over HTTPS.
@@ -99,8 +101,10 @@ or have your admin enable SMTP AUTH for the mailbox.
 
 Each run copies every generated report file into `reports/` (this directory
 is git-ignored — it's only populated at run time, both locally and in CI).
-The primary report is `reports/FHIR_Reference_Integrity_Report.xlsx`, with
-the supporting per-contract CSVs and `.docx` alongside it.
+The primary report is `reports/reference_integrity_contract_<CONTRACT(S)>_report.xlsx`,
+named dynamically after whichever contract(s) the run covered (e.g.
+`reference_integrity_contract_H5826_report.xlsx`), with the supporting
+per-contract CSVs and the matching `.docx` alongside it.
 
 ### Downloading the report from GitHub Actions
 

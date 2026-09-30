@@ -583,6 +583,11 @@ def build_report(contracts):
               f"Run: pip install openpyxl python-docx")
         return
 
+    # Dynamic filename driven by whichever contract(s) were actually run, e.g.
+    # reference_integrity_contract_H5826_report.xlsx for one contract, or
+    # reference_integrity_contract_H1619_H3124_report.xlsx for several.
+    report_base = "reference_integrity_contract_" + "_".join(contracts) + "_report"
+
     data = {}
     for c in contracts:
         shdr, srows = _read_csv(f"dangling_summary_{c}.csv")
@@ -691,7 +696,7 @@ def build_report(contracts):
             worp.append(["No orphaned resources found."])
         worp.freeze_panes = "A2"
 
-    xlsx_path = "FHIR_Reference_Integrity_Report.xlsx"
+    xlsx_path = f"{report_base}.xlsx"
     wb.save(xlsx_path)
 
     # ---- Word ----
@@ -850,10 +855,9 @@ def build_report(contracts):
     doc.add_paragraph()
     foot = doc.add_paragraph()
     foot.add_run("Full detail (per-reference breakdowns) is available in the "
-                 "accompanying Excel workbook: "
-                 "FHIR_Reference_Integrity_Report.xlsx").italic = True
+                 f"accompanying Excel workbook: {xlsx_path}").italic = True
 
-    docx_path = "FHIR_Reference_Integrity_Report.docx"
+    docx_path = f"{report_base}.docx"
     doc.save(docx_path)
 
     print(f"\nWrote report: {xlsx_path}, {docx_path}")

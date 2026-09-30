@@ -15,8 +15,8 @@ dangling_summary_*.csv
 orphan_refs_*.csv
 placeholder_refs_*.csv
 resource_counts_*.csv
-FHIR_Reference_Integrity_Report.xlsx
-FHIR_Reference_Integrity_Report.docx
+reference_integrity_contract_*_report.xlsx
+reference_integrity_contract_*_report.docx
 validation_run.log
 
 # Never commit secrets
