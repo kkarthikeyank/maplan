@@ -170,7 +170,26 @@ jobs:
           git add state/mpf_state.json
           if git diff --cached --quiet; then
             echo "No state change to commit."
-          else
-            git commit -m "chore: update MPF validation state [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore: update MPF validation state [skip ci]"
+
+          # Overlapping runs (15-min cron + cancel-in-progress: false means
+          # runs queue rather than cancel) can race here: two finalize jobs
+          # both try to push the state update, and a plain `git push` would
+          # silently lose whichever one loses the race (non-fast-forward
+          # rejection), making the next run think nothing was ever processed
+          # and re-queue the same contract forever. Retry with rebase instead
+          # of failing outright.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "State pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) -- another run updated state first. Rebasing and retrying..."
+            git fetch origin main
+            git rebase origin/main
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push state update after 5 attempts -- a concurrent run may still be in progress."
+          exit 1
